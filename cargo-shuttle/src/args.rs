@@ -144,6 +144,9 @@ pub struct RunArgs {
     /// use 0.0.0.0 instead of localhost (for usage with local external devices)
     #[clap(long)]
     pub external: bool,
+    /// run your project without exiting after every save.
+    #[clap(long)]
+    pub watch: bool,
 }
 
 #[derive(Parser, Debug)]

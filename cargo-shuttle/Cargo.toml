@@ -51,6 +51,10 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 url = "2.3.1"
 uuid = { workspace = true, features = ["v4"] }
 webbrowser = "0.8.2"
+watchexec = "2.0"
+watchexec-filterer-globset = "1.0.0"
+miette = "5.5.0"
+thiserror.workspace = true
 
 [dependencies.shuttle-common]
 workspace = true

@@ -4,13 +4,22 @@ pub mod config;
 mod factory;
 mod init;
 
+use miette::{Diagnostic, IntoDiagnostic};
 use shuttle_common::project::ProjectName;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::{read_to_string, File};
-use std::io::stdout;
+use std::io::{self, stdout};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+use watchexec::action::{Action, Outcome};
+use watchexec::config::{InitConfig, RuntimeConfig};
+use watchexec::handler::PrintDebug;
+use watchexec::signal::source::MainSignal;
+use watchexec::Watchexec;
+use watchexec_filterer_globset::GlobsetFilterer;
 
 use anyhow::{anyhow, bail, Context, Result};
 pub use args::{Args, Command, DeployArgs, InitArgs, LoginArgs, ProjectArgs, RunArgs};
@@ -39,6 +48,10 @@ use uuid::Uuid;
 
 use crate::args::{DeploymentCommand, ProjectCommand};
 use crate::client::Client;
+
+#[derive(Debug, thiserror::Error, Diagnostic)]
+#[error("stub")]
+struct NoneError;
 
 pub struct Shuttle {
     ctx: RequestContext,
@@ -363,8 +376,59 @@ impl Shuttle {
         Ok(())
     }
 
+    async fn make_watcher(
+        &self,
+        run_args: RunArgs,
+    ) -> Result<Arc<Watchexec>, watchexec::error::CriticalError> {
+        let mut init = InitConfig::default();
+        init.on_error(PrintDebug(std::io::stderr()));
+
+        let ignores: Vec<(String, Option<PathBuf>)> = vec![
+            (String::from(".#*"), None),
+            (
+                format!("**{s}.git{s}**", s = std::path::MAIN_SEPARATOR),
+                None,
+            ),
+        ];
+        let working_directory = std::env::current_dir().unwrap();
+
+        let mut runtime = RuntimeConfig::default();
+        runtime.pathset([working_directory.clone()]);
+        runtime.action_throttle(Duration::from_secs(2));
+        let filter = GlobsetFilterer::new(working_directory, [], ignores, [], [])
+            .await
+            .into_diagnostic()
+            .unwrap();
+
+        runtime.filterer(Arc::new(filter));
+
+        runtime.command(watchexec::command::Command::Exec {
+            prog: "shuttle".into(),
+            args: [run_args.port]
+                .into_iter()
+                .map(|item| item.to_string())
+                .collect(),
+        });
+
+        runtime.on_action(move |action: Action| async move {
+            for p in action.events.clone().iter() {
+                for s in p.signals() {
+                    if let MainSignal::Interrupt | MainSignal::Quit | MainSignal::Terminate = s {
+                        action.outcome(Outcome::Exit);
+                        return Ok(());
+                    }
+                }
+            }
+            let timestamp = chrono::Utc::now().format("%+");
+            println!("{timestamp}");
+            Result::<_, io::Error>::Ok(())
+        });
+        Watchexec::new(init, runtime)
+    }
+
     async fn local_run(&self, run_args: RunArgs) -> Result<()> {
         trace!("starting a local run for a service: {run_args:?}");
+        let working_directory = self.ctx.working_directory();
 
         let (tx, rx): (crossbeam_channel::Sender<Message>, _) = crossbeam_channel::bounded(0);
         tokio::task::spawn_blocking(move || {
@@ -381,7 +445,6 @@ impl Shuttle {
             }
         });
 
-        let working_directory = self.ctx.working_directory();
         let id = Default::default();
 
         trace!("building project");
@@ -447,6 +510,12 @@ impl Shuttle {
             trace!("closing so file");
             so.close().unwrap();
         });
+
+        if run_args.watch {
+            let we = self.make_watcher(run_args).await.unwrap();
+            tokio::spawn(handle);
+            we.main().await??;
+        }
 
         Ok(())
     }
